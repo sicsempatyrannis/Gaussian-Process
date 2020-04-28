@@ -1,0 +1,113 @@
+import numpy as np
+import pandas as pd 
+import math
+from scipy.spatial.distance import cdist
+from scipy.optimize import minimize
+
+class GPRegressor:
+
+    def __init__(self, point = 1.0, varf = 1.0, normalise_y = True, hyper_restarts = 1):
+    
+        self.varf = varf
+        self.normalise_y = normalise_y
+        self.num_restarts = hyper_restarts
+        self.point = np.array(point)
+        
+    def predict_torque(self, X, return_std=False):
+ 
+        point = self.point
+        self.K2 = self.node(X, self.X_train, np.zeros_like(X), self.var_x, point, self.varf)  
+        mean = np.dot(self.K2, self.pred_vec) + self.mu                                     
+        if return_std:
+            std2 = np.sqrt(np.diag(self.autonode(X, np.zeros_like(X), point, self.varf) - np.dot(self.K2, np.dot(self.pred_fac, self.K2.T))))
+            return mean, std2
+        else:
+            return mean, 0.0
+
+
+        
+    def node(self, X1, X2, var_x1, var_x2, point, varf):
+
+        tmp_mean = 0.0
+        tmp_var = 1.0
+        point = point * np.ones(len(self.X_train[0,:]))      
+        for i in range(0, len(X1[0,:])):
+            l2 = point[i] * point[i]                         
+            dist_mean = cdist(X1[:,i].reshape(-1,1), X2[:,i].reshape(-1, 1), metric='sqeuclidean')
+            dist_var = cdist(var_x1[:,i].reshape(-1,1), -var_x2[:,i].reshape(-1, 1), metric='euclidean')
+            tmp_mean += dist_mean/(l2+dist_var)
+            tmp_var *= (1.0 + dist_var/l2)  
+        return varf * np.power(tmp_var,-0.5) * np.exp(-0.5 * tmp_mean)
+        
+    
+    def autonode(self, X, var_x, point, varf):
+
+        tmp_mean = 0.0
+        tmp_var = 1.0
+        point = point * np.ones(len(self.X_train[0,:]))
+        for i in range(0,len(X[0,:])):
+            l2 = point[i] * point[i] #!
+            dist_mean = cdist(X[:,i].reshape(-1,1),X[:,i].reshape(-1,1),metric='sqeuclidean')
+            dist_var = cdist(var_x[:,i].reshape(-1,1),-var_x[:,i].reshape(-1,1),metric='euclidean')
+            tmp_mean += dist_mean/(l2+dist_var)
+            tmp_var *= (1.0+dist_var/l2)  
+        return varf * np.power(tmp_var, -0.5) * np.exp(-0.5 * tmp_mean)  
+    
+
+    def fit(self ,X_train, y_train, var_x, var_y, point_bounds=None):
+
+        if self.normalise_y:
+            self.mu=np.mean(y_train,0)
+        else:
+            self.mu=0.0
+            
+        self.X_train=X_train
+        self.y_train = (y_train-self.mu)
+        
+        if np.iterable(var_x):
+            self.var_x=var_x
+        else:
+            self.var_x=var_x*np.ones_like(X_train)
+        
+        self.var_y=var_y
+        
+        
+        
+        if point_bounds is not None:
+            bounds = []
+            for i in range(0, len(point_bounds)):
+                bounds.append(point_bounds[i])
+            best_f = 1e6
+            for j in range(0, self.num_restarts):
+                loglb = np.log10(point_bounds[:,0])                            
+                loghb = np.log10(point_bounds[:,1])                            
+                l0 = loglb + (loghb-loglb) * np.random.random(size=loglb.shape)
+                l0 = 10.0 ** l0   
+                
+                
+                res = minimize(self.neg_log_marginal_likelihood,l0,tol=1e-12,options={'disp':False,'eps':0.001})
+                
+                
+
+                self.varf = res['x'][0]
+                self.alpha = res['x'][1]
+                self.point = res['x'][2::]
+                self.opt_params = res['x']
+                
+                print ("iter: "+str(j) +". params: " + str(self.varf) + ", " + str(self.alpha) + ", " + str(self.point))    
+            self.var_y+=self.alpha
+            
+        
+        
+        self.K1 = self.autonode(self.X_train, self.var_x, self.point, self.varf)                  
+        self.pred_fac = np.linalg.pinv(self.K1 + np.identity(len(self.K1[:,0])) * self.var_y) 
+        self.pred_vec = np.dot(self.pred_fac, self.y_train)                                 
+        
+    def neg_log_marginal_likelihood(self, point):
+     
+        varf = point[0]
+        varn = point[1]
+        point = point[2::]
+        K = self.autonode(self.X_train, self.var_x, point, varf) + np.identity(len(self.X_train[:,0])) * (self.var_y + varn)     
+        Kinv = np.linalg.pinv(K)
+        return 0.5 * np.dot(self.y_train, np.dot(Kinv, self.y_train)) + 0.5 * np.log(np.linalg.det(K)) + 0.5 * len(K[:,0]) * np.log(2*math.pi)
